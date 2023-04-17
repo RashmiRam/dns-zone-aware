@@ -90,7 +90,7 @@ func main() {
 	if inputConfig.useKubeDnsServer {
 		ip := findKubeDnsServerIp(ctx, log)
 		if ip != "" {
-			inputConfig.dnsServer = ip + ":53"
+			inputConfig.dnsServer = ip
 		}
 	}
 	h := &handler{
@@ -158,7 +158,12 @@ type handler struct {
 
 func findKubeDnsServerIp(ctx context.Context, log logr.Logger) string {
 	// Kubernetes Client in cluster call to fetch the DNS service Ip
-	clientset, err := kubernetes.NewForConfig(&rest.Config{})
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		log.Error(err, "cannot create kubernetes client config")
+		return inputConfig.dnsServer
+	}
+	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		log.Error(err, "cannot create kubernetes client")
 		return inputConfig.dnsServer
@@ -172,7 +177,7 @@ func findKubeDnsServerIp(ctx context.Context, log logr.Logger) string {
 		return inputConfig.dnsServer
 	}
 	log.Info("found kube-dns pod", "pod", pods.Items[0].Name, "ip", pods.Items[0].Status.PodIP)
-	return pods.Items[0].Status.PodIP
+	return pods.Items[0].Status.PodIP + ":53"
 
 }
 
