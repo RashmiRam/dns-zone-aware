@@ -18,6 +18,9 @@ import (
 	"github.com/surki/dns-zone-aware/internal"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 
 	"github.com/aws/aws-sdk-go/aws/ec2metadata"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -27,6 +30,7 @@ type Config struct {
 	dnsServer             string
 	listenAddr            string
 	prefixSeparator       string
+	useKubeDnsServer      bool
 	dnsServerTimeout      int64
 	BackOffStrategy       string
 	BackOffMaxJitter      int64
@@ -45,7 +49,6 @@ func init() {
 	inputConfig = Config{}
 	flag.StringVar(&inputConfig.dnsServer, "dns-server", "169.254.169.253:53", "DNS resolver to use")
 	flag.StringVar(&inputConfig.listenAddr, "listen-addr", "127.0.0.1:53", "DNS server listen address")
-
 	inputConfig.dnsServerTimeout = *flag.Int64("dns-server.timeoutMillis", 5000, "Timeout for DNS server")
 	flag.StringVar(&inputConfig.BackOffStrategy, "dns-server.backoff-strategy", "exponential", "Backoff Strategy to use when request to DNS Server are retried. exponential or constant")
 	inputConfig.BackOffMaxJitter = *flag.Int64("dns-server.backoff-maxjitter", 10, "Jitter for BackOff computation")
@@ -55,6 +58,7 @@ func init() {
 	inputConfig.BackOffExponentFactor = *flag.Float64("dns-server.backoff-expfactor", 2, "Factor for Exponential BackOff computation")
 	inputConfig.MaxRetries = *flag.Int("dns-server.retries", 3, "No of Retries for DNS server")
 	flag.StringVar(&inputConfig.prefixSeparator, "dns-server.prefix-separator", ".", "Separator to use when prefixing the zoneid to DNS")
+	flag.BoolVar(&inputConfig.useKubeDnsServer, "dns-server.use-kube-dns", false, "Use the KubeDNS server to resolve the DNS queries")
 	flag.Parse()
 }
 
@@ -83,6 +87,12 @@ func main() {
 
 	var wg sync.WaitGroup
 
+	if inputConfig.useKubeDnsServer {
+		ip := findKubeDnsServerIp(ctx, log)
+		if ip != "" {
+			inputConfig.dnsServer = ip + ":53"
+		}
+	}
 	h := &handler{
 		ctx: ctx,
 		log: log,
@@ -144,6 +154,26 @@ type handler struct {
 	log       logr.Logger
 	dnsClient *dns.Client
 	backoff   internal.Backoff
+}
+
+func findKubeDnsServerIp(ctx context.Context, log logr.Logger) string {
+	// Kubernetes Client in cluster call to fetch the DNS service Ip
+	clientset, err := kubernetes.NewForConfig(&rest.Config{})
+	if err != nil {
+		log.Error(err, "cannot create kubernetes client")
+		return inputConfig.dnsServer
+	}
+	pods, err := clientset.CoreV1().Pods("kube-system").List(ctx, v1.ListOptions{LabelSelector: "k8s-app=kube-dns"})
+	if err != nil {
+		log.Error(err, "cannot find kube-dns pod")
+		return inputConfig.dnsServer
+	}
+	if len(pods.Items) == 0 {
+		return inputConfig.dnsServer
+	}
+	log.Info("found kube-dns pod", "pod", pods.Items[0].Name, "ip", pods.Items[0].Status.PodIP)
+	return pods.Items[0].Status.PodIP
+
 }
 
 func initBackOffStrategy() internal.Backoff {
