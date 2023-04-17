@@ -88,8 +88,8 @@ func main() {
 	var wg sync.WaitGroup
 
 	if inputConfig.useKubeDnsServer {
-		ip := findKubeDnsServerIp(ctx, log)
-		if ip != "" {
+		ip, err := findKubeDnsServerIp(ctx, log)
+		if err == nil {
 			inputConfig.dnsServer = ip
 		}
 	}
@@ -156,28 +156,28 @@ type handler struct {
 	backoff   internal.Backoff
 }
 
-func findKubeDnsServerIp(ctx context.Context, log logr.Logger) string {
-	// Kubernetes Client in cluster call to fetch the DNS service Ip
+func findKubeDnsServerIp(ctx context.Context, log logr.Logger) string, err {
+	// Kubernetes Client in cluster call to fetch the DNS service ip and return err
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		log.Error(err, "cannot create kubernetes client config")
-		return inputConfig.dnsServer
+		return "", err
 	}
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		log.Error(err, "cannot create kubernetes client")
-		return inputConfig.dnsServer
+		return "", err
 	}
-	pods, err := clientset.CoreV1().Pods("kube-system").List(ctx, v1.ListOptions{LabelSelector: "k8s-app=kube-dns"})
+	svc, err := clientset.CoreV1().Services("kube-system").Get(ctx, "kube-dns", v1.GetOptions{})
 	if err != nil {
-		log.Error(err, "cannot find kube-dns pod")
-		return inputConfig.dnsServer
+		log.Error(err, "cannot find kube-dns service")
+		return "", err
 	}
-	if len(pods.Items) == 0 {
-		return inputConfig.dnsServer
+	if svc.Spec.ClusterIP == "" {
+		log.Error(err, "kube-dns service does not have a cluster ip")
+		return "", errors.New("kube-dns service does not have a cluster ip")
 	}
-	log.Info("found kube-dns pod", "pod", pods.Items[0].Name, "ip", pods.Items[0].Status.PodIP)
-	return pods.Items[0].Status.PodIP + ":53"
+	return svc.Spec.ClusterIP + ":53"
 
 }
 
