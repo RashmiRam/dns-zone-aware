@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -87,19 +88,14 @@ func main() {
 
 	var wg sync.WaitGroup
 
-	if inputConfig.useKubeDnsServer {
-		ip, err := findKubeDnsServerIp(ctx, log)
-		if err == nil {
-			inputConfig.dnsServer = ip
-		}
-	}
 	h := &handler{
 		ctx: ctx,
 		log: log,
 		dnsClient: &dns.Client{
 			Timeout: time.Duration(time.Duration(inputConfig.dnsServerTimeout).Milliseconds()),
 		},
-		backoff: initBackOffStrategy(),
+		backoff:   initBackOffStrategy(),
+		dnsServer: resolveDnsServerAddress(log),
 	}
 
 	// TCP
@@ -153,32 +149,8 @@ type handler struct {
 	ctx       context.Context
 	log       logr.Logger
 	dnsClient *dns.Client
+	dnsServer string
 	backoff   internal.Backoff
-}
-
-func findKubeDnsServerIp(ctx context.Context, log logr.Logger) string, err {
-	// Kubernetes Client in cluster call to fetch the DNS service ip and return err
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		log.Error(err, "cannot create kubernetes client config")
-		return "", err
-	}
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		log.Error(err, "cannot create kubernetes client")
-		return "", err
-	}
-	svc, err := clientset.CoreV1().Services("kube-system").Get(ctx, "kube-dns", v1.GetOptions{})
-	if err != nil {
-		log.Error(err, "cannot find kube-dns service")
-		return "", err
-	}
-	if svc.Spec.ClusterIP == "" {
-		log.Error(err, "kube-dns service does not have a cluster ip")
-		return "", errors.New("kube-dns service does not have a cluster ip")
-	}
-	return svc.Spec.ClusterIP + ":53"
-
 }
 
 func initBackOffStrategy() internal.Backoff {
@@ -197,6 +169,41 @@ func initBackOffStrategy() internal.Backoff {
 	}
 }
 
+func resolveDnsServerAddress(log logr.Logger) string {
+	if inputConfig.useKubeDnsServer {
+		ip, err := findKubeDnsServerIp(log)
+		if err == nil {
+			return ip
+		}
+	}
+	log.Info("Falling back to dnsServer from config", "dnsServer", inputConfig.dnsServer)
+	return inputConfig.dnsServer
+}
+
+// Kubernetes Client in cluster call to fetch the DNS service ip and return err
+func findKubeDnsServerIp(log logr.Logger) (string, error) {
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		log.Error(err, "cannot create kubernetes client config")
+		return "", err
+	}
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		log.Error(err, "cannot create kubernetes client")
+		return "", err
+	}
+	svc, err := clientset.CoreV1().Services("kube-system").Get(context.Background(), "kube-dns", v1.GetOptions{})
+	if err != nil {
+		log.Error(err, "cannot find kube-dns service")
+		return "", err
+	}
+	if svc.Spec.ClusterIP == "" {
+		log.Error(err, "kube-dns service does not have a cluster ip")
+		return "", errors.New("kube-dns service does not have a cluster ip")
+	}
+	return svc.Spec.ClusterIP + ":53", nil
+
+}
 func getLogger() *zap.Logger {
 	config := zap.NewDevelopmentConfig()
 	config.Level = zap.NewAtomicLevelAt(zapcore.InfoLevel)
